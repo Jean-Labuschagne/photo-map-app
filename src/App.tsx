@@ -61,19 +61,50 @@ const getErrorMessage = (error: unknown) => {
   return 'Unknown error';
 };
 
+const uploadBytesWithTimeout = async (
+  storageRef: ReturnType<typeof ref>,
+  file: File,
+  timeoutMs = 12000
+) => {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error('Upload timed out while waiting for storage response.'));
+      }, timeoutMs);
+    });
+
+    await Promise.race([uploadBytes(storageRef, file), timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+};
+
 const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'photo') => {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const objectPath = `pins/${pinId}/${prefix}-${Date.now()}-${safeName}`;
 
-  try {
-    const primaryRef = ref(storage, objectPath);
-    await uploadBytes(primaryRef, file);
-    return getDownloadURL(primaryRef);
-  } catch {
-    const fallbackRef = ref(storageFallback, objectPath);
-    await uploadBytes(fallbackRef, file);
-    return getDownloadURL(fallbackRef);
+  const candidates = storageFallback ? [storage, storageFallback] : [storage];
+  let lastError: unknown;
+
+  for (const candidate of candidates) {
+    try {
+      const candidateRef = ref(candidate, objectPath);
+      await uploadBytesWithTimeout(candidateRef, file);
+      return getDownloadURL(candidateRef);
+    } catch (error) {
+      lastError = error;
+    }
   }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error('No storage bucket candidates available.');
 };
 
 function App() {
