@@ -16,13 +16,21 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const configuredBucket = (firebaseConfig.storageBucket || '').trim();
 const appspotBucket = `${firebaseConfig.projectId}.appspot.com`;
-const normalizedBucket = configuredBucket.endsWith('.firebasestorage.app')
-  ? appspotBucket
-  : configuredBucket;
-const primaryBucket = normalizedBucket || appspotBucket;
-const secondaryBucket = primaryBucket === appspotBucket ? configuredBucket || null : appspotBucket;
+const firebasestorageBucket = `${firebaseConfig.projectId}.firebasestorage.app`;
+
+const rawCandidates = [
+  appspotBucket,
+  firebasestorageBucket,
+  configuredBucket,
+].filter((value) => Boolean(value));
+
+const STORAGE_BUCKET_CANDIDATES = [...new Set(rawCandidates)];
+
+const primaryBucket = STORAGE_BUCKET_CANDIDATES[0];
+const secondaryBucket = STORAGE_BUCKET_CANDIDATES.length > 1 ? STORAGE_BUCKET_CANDIDATES[1] : null;
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app, `gs://${primaryBucket}`);
 export const storageFallback = secondaryBucket ? getStorage(app, `gs://${secondaryBucket}`) : null;
+export { STORAGE_BUCKET_CANDIDATES };

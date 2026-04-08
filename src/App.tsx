@@ -18,7 +18,7 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
-import { auth, db, storage, storageFallback } from './lib/firebase';
+import { auth, db, storage, storageFallback, STORAGE_BUCKET_CANDIDATES } from './lib/firebase';
 import './App.css';
 
 export interface PhotoPin {
@@ -64,7 +64,7 @@ const getErrorMessage = (error: unknown) => {
 const uploadBytesWithTimeout = async (
   storageRef: ReturnType<typeof ref>,
   file: File,
-  timeoutMs = 12000
+  timeoutMs = 8000
 ) => {
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
@@ -101,9 +101,7 @@ const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'phot
   }
 
   if (lastError) {
-    const bucketNames = candidates
-      .map((candidate) => candidate.app.options.storageBucket || 'unknown-bucket')
-      .join(', ');
+    const bucketNames = STORAGE_BUCKET_CANDIDATES.join(', ');
     throw new Error(`${getErrorMessage(lastError)} (Buckets tried: ${bucketNames})`);
   }
 
