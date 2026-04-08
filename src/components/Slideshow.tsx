@@ -140,7 +140,7 @@ const Slideshow = ({ pin, onClose }: SlideshowProps) => {
           <button onClick={togglePlay}>
             {isPlaying ? <Pause size={20} /> : <Play size={20} />}
           </button>
-          <button onClick={toggleMute}>
+          <button onClick={toggleMute} disabled={!pin.song?.previewUrl}>
             {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
           </button>
           <button onClick={onClose}>
@@ -155,6 +155,16 @@ const Slideshow = ({ pin, onClose }: SlideshowProps) => {
           <MusicIcon />
           <span>{pin.song.title}</span>
           <span className="song-artist">— {pin.song.artist}</span>
+          {pin.song.id && (
+            <a
+              className="song-open-link"
+              href={pin.song.spotifyUrl || `https://open.spotify.com/track/${pin.song.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open in Spotify
+            </a>
+          )}
         </div>
       )}
 

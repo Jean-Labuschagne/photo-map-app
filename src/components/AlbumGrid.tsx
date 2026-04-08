@@ -100,6 +100,16 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
             <span>{pin.song.title}</span>
             <span className="song-artist">— {pin.song.artist}</span>
           </div>
+          {pin.song.id && (
+            <a
+              className="song-open-link"
+              href={pin.song.spotifyUrl || `https://open.spotify.com/track/${pin.song.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open in Spotify
+            </a>
+          )}
         </div>
       )}
 

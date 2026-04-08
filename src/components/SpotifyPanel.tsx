@@ -7,19 +7,17 @@ interface SpotifyTrack {
   artist: string;
   album: string;
   previewUrl: string | null;
+  spotifyUrl: string;
   image: string;
   duration: number;
 }
 
 interface SpotifyPanelProps {
   onClose: () => void;
-  onSelect: (song: { id: string; title: string; artist: string; previewUrl: string; startTime: number }) => void;
+  onSelect: (song: { id: string; title: string; artist: string; previewUrl: string | null; spotifyUrl: string; startTime: number }) => void;
 }
 
-// Spotify API credentials - REPLACE THESE WITH YOUR OWN
-// Get yours free at: https://developer.spotify.com/dashboard
-const SPOTIFY_CLIENT_ID = '';
-const SPOTIFY_CLIENT_SECRET = '';
+const SPOTIFY_PROXY_URL = 'http://localhost:8787';
 
 const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
   const [query, setQuery] = useState('');
@@ -28,47 +26,36 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
   const [selectedTrack, setSelectedTrack] = useState<SpotifyTrack | null>(null);
   const [startTime, setStartTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isSpotifyReady, setIsSpotifyReady] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Get Spotify access token on mount
+  // Verify the server-side proxy has Spotify credentials configured.
   useEffect(() => {
-    const getAccessToken = async () => {
-      if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
-        setAuthError('Spotify API credentials not configured');
-        return;
-      }
-
+    const checkSpotifyHealth = async () => {
       try {
-        const response = await fetch('https://accounts.spotify.com/api/token', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Authorization': 'Basic ' + btoa(SPOTIFY_CLIENT_ID + ':' + SPOTIFY_CLIENT_SECRET)
-          },
-          body: 'grant_type=client_credentials'
-        });
+        const response = await fetch(`${SPOTIFY_PROXY_URL}/api/spotify/health`);
 
         if (!response.ok) {
-          throw new Error('Failed to authenticate with Spotify');
+          throw new Error('Spotify proxy is not configured');
         }
 
-        const data = await response.json();
-        setAccessToken(data.access_token);
+        setIsSpotifyReady(true);
+        setAuthError(null);
       } catch (error) {
-        setAuthError('Failed to connect to Spotify. Please check your API credentials.');
+        setIsSpotifyReady(false);
+        setAuthError('Spotify is not ready. Start the proxy server and configure server credentials.');
       }
     };
 
-    getAccessToken();
+    checkSpotifyHealth();
   }, []);
 
-  // Search tracks using Spotify API
+  // Search tracks via the secure server-side proxy.
   const searchTracks = useCallback(async (searchQuery: string) => {
-    if (!searchQuery.trim() || !accessToken) {
-      if (!accessToken) {
-        setAuthError('Not connected to Spotify');
+    if (!searchQuery.trim() || !isSpotifyReady) {
+      if (!isSpotifyReady) {
+        setAuthError('Spotify proxy is unavailable');
       }
       setResults([]);
       return;
@@ -78,33 +65,24 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
     setAuthError(null);
 
     try {
-      const response = await fetch(
-        `https://api.spotify.com/v1/search?q=${encodeURIComponent(searchQuery)}&type=track&limit=10`,
-        {
-          headers: {
-            'Authorization': `Bearer ${accessToken}`
-          }
-        }
-      );
+      const response = await fetch(`${SPOTIFY_PROXY_URL}/api/spotify/search?q=${encodeURIComponent(searchQuery)}&limit=10`);
 
       if (!response.ok) {
-        if (response.status === 401) {
-          setAuthError('Spotify session expired. Please refresh.');
-          setAccessToken(null);
-        }
+        setAuthError('Spotify search failed. Check proxy server logs.');
         throw new Error('Search failed');
       }
 
       const data = await response.json();
       
-      const tracks: SpotifyTrack[] = data.tracks.items.map((track: any) => ({
+      const tracks: SpotifyTrack[] = data.tracks.map((track: any) => ({
         id: track.id,
-        title: track.name,
-        artist: track.artists.map((a: any) => a.name).join(', '),
-        album: track.album.name,
-        previewUrl: track.preview_url,
-        image: track.album.images[0]?.url || 'https://via.placeholder.com/100',
-        duration: Math.floor(track.duration_ms / 1000)
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        previewUrl: track.previewUrl,
+        spotifyUrl: track.spotifyUrl,
+        image: track.image,
+        duration: track.duration,
       }));
 
       setResults(tracks);
@@ -114,7 +92,7 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
     } finally {
       setIsLoading(false);
     }
-  }, [accessToken]);
+  }, [isSpotifyReady]);
 
   const handleSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -173,7 +151,8 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
         id: selectedTrack.id,
         title: selectedTrack.title,
         artist: selectedTrack.artist,
-        previewUrl: selectedTrack.previewUrl || '',
+        previewUrl: selectedTrack.previewUrl,
+        spotifyUrl: selectedTrack.spotifyUrl,
         startTime,
       });
     }
@@ -215,10 +194,9 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
             <div className="auth-instructions">
               <p><strong>To enable Spotify search:</strong></p>
               <ol>
-                <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer">Spotify Developer Dashboard</a></li>
-                <li>Create a free app</li>
-                <li>Copy your <strong>Client ID</strong> and <strong>Client Secret</strong></li>
-                <li>Add them to the SpotifyPanel.tsx file</li>
+                <li>Create <strong>app/.env</strong> from <strong>app/.env.example</strong></li>
+                <li>Add <strong>SPOTIFY_CLIENT_ID</strong> and <strong>SPOTIFY_CLIENT_SECRET</strong></li>
+                <li>Run <strong>npm run dev</strong> so the Spotify proxy starts</li>
               </ol>
             </div>
           </div>
@@ -231,9 +209,9 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
             placeholder="Search for a song or artist..."
             value={query}
             onChange={e => setQuery(e.target.value)}
-            disabled={!accessToken}
+            disabled={!isSpotifyReady}
           />
-          <button type="submit" disabled={isLoading || !accessToken}>
+          <button type="submit" disabled={isLoading || !isSpotifyReady}>
             {isLoading ? <Loader2 size={18} className="spin" /> : 'Search'}
           </button>
         </form>
@@ -273,8 +251,16 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
                 <h4>{selectedTrack.title}</h4>
                 <p>{selectedTrack.artist}</p>
                 {!selectedTrack.previewUrl && (
-                  <span className="no-preview-warning">No preview available</span>
+                  <span className="no-preview-warning">No preview available. You can still add it and open in Spotify.</span>
                 )}
+                <a
+                  className="spotify-open-link"
+                  href={selectedTrack.spotifyUrl || `https://open.spotify.com/track/${selectedTrack.id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open in Spotify
+                </a>
               </div>
             </div>
 
@@ -311,7 +297,6 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
               <button 
                 className="primary" 
                 onClick={handleConfirm}
-                disabled={!selectedTrack.previewUrl}
               >
                 Add to Album
               </button>

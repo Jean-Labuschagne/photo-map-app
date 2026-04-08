@@ -21,7 +21,8 @@ export interface PhotoPin {
     id: string;
     title: string;
     artist: string;
-    previewUrl: string;
+    previewUrl: string | null;
+    spotifyUrl: string;
     startTime: number;
   };
 }
@@ -112,7 +113,7 @@ function App() {
     setShowSpotifyPanel(true);
   }, []);
 
-  const handleSongSelect = useCallback((song: { id: string; title: string; artist: string; previewUrl: string; startTime: number }) => {
+  const handleSongSelect = useCallback((song: { id: string; title: string; artist: string; previewUrl: string | null; spotifyUrl: string; startTime: number }) => {
     if (selectedPin) {
       setPins(prev => prev.map(p => 
         p.id === selectedPin.id 
