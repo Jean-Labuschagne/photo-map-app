@@ -10,6 +10,8 @@ import { onAuthStateChanged, signInWithEmailAndPassword, type User, signOut } fr
 import {
   collection,
   doc,
+  getDocs,
+  limit,
   onSnapshot,
   orderBy,
   query,
@@ -163,6 +165,8 @@ function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [syncProgress, setSyncProgress] = useState<number | null>(null);
   const [syncMessage, setSyncMessage] = useState('Syncing...');
+  const [firestoreHealth, setFirestoreHealth] = useState<'unknown' | 'ok' | 'failed'>('unknown');
+  const [firestoreHealthMessage, setFirestoreHealthMessage] = useState<string | null>(null);
 
   const selectedPin = useMemo(
     () => pins.find((pin) => pin.id === selectedPinId) || null,
@@ -190,8 +194,26 @@ function App() {
     if (!user) {
       setPins([]);
       setSelectedPinId(null);
+      setFirestoreHealth('unknown');
+      setFirestoreHealthMessage(null);
       return;
     }
+
+    withTimeout(
+      getDocs(query(collection(db, 'pins'), limit(1))),
+      'Firestore health check',
+      10000
+    )
+      .then(() => {
+        setFirestoreHealth('ok');
+        setFirestoreHealthMessage(null);
+      })
+      .catch((error) => {
+        setFirestoreHealth('failed');
+        setFirestoreHealthMessage(
+          `Firestore connection issue: ${getErrorMessage(error)}. Check Vercel Firebase env vars and Firestore initialization for ${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'unknown-project'}.`
+        );
+      });
 
     const pinsQuery = query(collection(db, 'pins'), orderBy('createdAt', 'desc'));
     const unsubscribe = onSnapshot(
@@ -223,7 +245,9 @@ function App() {
           setShowSlideshow(false);
         }
       },
-      () => {
+      (error) => {
+        setFirestoreHealth('failed');
+        setFirestoreHealthMessage(`Firestore live sync failed: ${getErrorMessage(error)}`);
         setAppError('Unable to load locations from Firebase. Check Firestore rules and indexes.');
       }
     );
@@ -539,6 +563,9 @@ function App() {
 
       {/* Main Content */}
       <main className="main-content">
+        {firestoreHealth === 'failed' && firestoreHealthMessage && (
+          <div className="app-error-banner">{firestoreHealthMessage}</div>
+        )}
         {appError && <div className="app-error-banner">{appError}</div>}
         {/* Map View */}
         {!showAlbum && !showSlideshow && (
