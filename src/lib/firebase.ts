@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { initializeFirestore } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 
 const firebaseConfig = {
@@ -30,7 +30,9 @@ const primaryBucket = STORAGE_BUCKET_CANDIDATES[0];
 const secondaryBucket = STORAGE_BUCKET_CANDIDATES.length > 1 ? STORAGE_BUCKET_CANDIDATES[1] : null;
 
 export const auth = getAuth(app);
-export const db = getFirestore(app);
+export const db = initializeFirestore(app, {
+  experimentalAutoDetectLongPolling: true,
+});
 export const storage = getStorage(app, `gs://${primaryBucket}`);
 export const storageFallback = secondaryBucket ? getStorage(app, `gs://${secondaryBucket}`) : null;
 export { STORAGE_BUCKET_CANDIDATES };
