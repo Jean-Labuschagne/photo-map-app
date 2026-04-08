@@ -8,14 +8,17 @@ interface AlbumGridProps {
   onAddSong: () => void;
   onAddPhoto: (pinId: string, file: File) => void;
   onRemovePhoto: (pinId: string, photoIndex: number) => void;
+  isSyncing?: boolean;
+  syncProgress?: number | null;
 }
 
-const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: AlbumGridProps) => {
+const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto, isSyncing = false, syncProgress = null }: AlbumGridProps) => {
   const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (isSyncing) return;
     const files = e.target.files;
     if (files) {
       Array.from(files).forEach(file => {
@@ -24,11 +27,12 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
         }
       });
     }
-  }, [pin.id, onAddPhoto]);
+  }, [pin.id, onAddPhoto, isSyncing]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
+    if (isSyncing) return;
     
     const files = e.dataTransfer.files;
     Array.from(files).forEach(file => {
@@ -36,7 +40,7 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
         onAddPhoto(pin.id, file);
       }
     });
-  }, [pin.id, onAddPhoto]);
+  }, [pin.id, onAddPhoto, isSyncing]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -68,6 +72,7 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
           <button 
             className="album-action-btn primary"
             onClick={() => fileInputRef.current?.click()}
+            disabled={isSyncing}
           >
             <Plus size={18} />
             Add Photos
@@ -82,6 +87,12 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
           />
         </div>
       </div>
+
+      {isSyncing && (
+        <div className="album-sync-status">
+          <span>Syncing upload{syncProgress !== null ? ` (${syncProgress}%)` : '...'}</span>
+        </div>
+      )}
 
       {pin.song && (
         <div className="album-song-bar">
@@ -126,6 +137,7 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
                 <img src={photo} alt={`Photo ${index + 1}`} />
                 <button 
                   className="photo-delete-btn"
+                  disabled={isSyncing}
                   onClick={(e) => {
                     e.stopPropagation();
                     onRemovePhoto(pin.id, index);

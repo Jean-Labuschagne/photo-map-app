@@ -1465,6 +1465,32 @@ body {
   color: var(--accent);
   font-size: 0.8rem;
   font-weight: 600;
+  min-width: 200px;
+}
+
+.save-progress-track {
+  margin-top: 0.25rem;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  overflow: hidden;
+}
+
+.save-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+
+.session-debug {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: 1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
 }
 
 .app-error-banner {
@@ -1474,6 +1500,17 @@ body {
   border: 1px solid rgba(239, 68, 68, 0.35);
   background: rgba(239, 68, 68, 0.08);
   color: #fecaca;
+}
+
+.album-sync-status {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 106, 61, 0.35);
+  background: rgba(255, 106, 61, 0.08);
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 600;
 }
 
 /* ========================================

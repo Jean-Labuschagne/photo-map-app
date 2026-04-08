@@ -17,7 +17,7 @@ import {
   setDoc,
   updateDoc,
 } from 'firebase/firestore';
-import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { deleteObject, getDownloadURL, ref, uploadBytesResumable } from 'firebase/storage';
 import { auth, db, storage, storageFallback, STORAGE_BUCKET_CANDIDATES } from './lib/firebase';
 import './App.css';
 
@@ -64,18 +64,33 @@ const getErrorMessage = (error: unknown) => {
 const uploadBytesWithTimeout = async (
   storageRef: ReturnType<typeof ref>,
   file: File,
+  onProgress?: (progress: number) => void,
   timeoutMs = 8000
 ) => {
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const uploadTask = uploadBytesResumable(storageRef, file);
 
   try {
+    const uploadPromise = new Promise<void>((resolve, reject) => {
+      uploadTask.on(
+        'state_changed',
+        (snapshot) => {
+          const progress = Math.round((snapshot.bytesTransferred / snapshot.totalBytes) * 100);
+          onProgress?.(progress);
+        },
+        (error) => reject(error),
+        () => resolve()
+      );
+    });
+
     const timeoutPromise = new Promise<never>((_resolve, reject) => {
       timeoutHandle = setTimeout(() => {
+        uploadTask.cancel();
         reject(new Error('Upload timed out while waiting for storage response.'));
       }, timeoutMs);
     });
 
-    await Promise.race([uploadBytes(storageRef, file), timeoutPromise]);
+    await Promise.race([uploadPromise, timeoutPromise]);
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
@@ -83,7 +98,12 @@ const uploadBytesWithTimeout = async (
   }
 };
 
-const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'photo') => {
+const uploadPinImage = async (
+  pinId: string,
+  file: File,
+  prefix: 'thumb' | 'photo',
+  onProgress?: (progress: number) => void
+) => {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const objectPath = `pins/${pinId}/${prefix}-${Date.now()}-${safeName}`;
 
@@ -93,7 +113,7 @@ const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'phot
   for (const candidate of candidates) {
     try {
       const candidateRef = ref(candidate, objectPath);
-      await uploadBytesWithTimeout(candidateRef, file);
+      await uploadBytesWithTimeout(candidateRef, file, onProgress);
       return getDownloadURL(candidateRef);
     } catch (error) {
       lastError = error;
@@ -124,6 +144,8 @@ function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<number | null>(null);
+  const [syncMessage, setSyncMessage] = useState('Syncing...');
 
   const selectedPin = useMemo(
     () => pins.find((pin) => pin.id === selectedPinId) || null,
@@ -211,18 +233,30 @@ function App() {
   }, []);
 
   const handleViewAlbum = useCallback(() => {
+    if (isSaving) {
+      setAppError('Please wait for sync to finish before changing views.');
+      return;
+    }
     setShowAlbum(true);
     setShowSlideshow(false);
-  }, []);
+  }, [isSaving]);
 
   const handlePlaySlideshow = useCallback(() => {
+    if (isSaving) {
+      setAppError('Please wait for sync to finish before changing views.');
+      return;
+    }
     setShowSlideshow(true);
     setShowAlbum(false);
-  }, []);
+  }, [isSaving]);
 
   const handleCloseAlbum = useCallback(() => {
+    if (isSaving) {
+      setAppError('Sync in progress. Please wait for upload to finish before closing the album.');
+      return;
+    }
     setShowAlbum(false);
-  }, []);
+  }, [isSaving]);
 
   const handleCloseSlideshow = useCallback(() => {
     setShowSlideshow(false);
@@ -246,11 +280,15 @@ function App() {
   }, [selectedPinId]);
 
   const handleAddPinClick = useCallback(() => {
+    if (isSaving) {
+      setAppError('Please wait for current sync to finish.');
+      return;
+    }
     setIsAddingPin(true);
     setSelectedPinId(null);
     setShowAlbum(false);
     setShowSlideshow(false);
-  }, []);
+  }, [isSaving]);
 
   const handleMapClick = useCallback((lng: number, lat: number) => {
     if (isAddingPin) {
@@ -270,6 +308,8 @@ function App() {
     if (!user) return;
 
     setIsSaving(true);
+    setSyncMessage('Saving location...');
+    setSyncProgress(null);
     setAppError(null);
 
     try {
@@ -279,7 +319,7 @@ function App() {
       const photos: string[] = [];
 
       if (pinInput.thumbnailFile) {
-        const thumbUrl = await uploadPinImage(pinRef.id, pinInput.thumbnailFile, 'thumb');
+        const thumbUrl = await uploadPinImage(pinRef.id, pinInput.thumbnailFile, 'thumb', setSyncProgress);
         thumbnail = thumbUrl;
         photos.push(thumbUrl);
       }
@@ -305,6 +345,7 @@ function App() {
       setAppError(`Failed to add location. ${getErrorMessage(error)}`);
     } finally {
       setIsSaving(false);
+      setSyncProgress(null);
     }
   }, [user]);
 
@@ -316,10 +357,12 @@ function App() {
 
   const handleAddPhoto = useCallback(async (pinId: string, file: File) => {
     setIsSaving(true);
+    setSyncMessage('Uploading photo...');
+    setSyncProgress(0);
     setAppError(null);
 
     try {
-      const photoUrl = await uploadPinImage(pinId, file, 'photo');
+      const photoUrl = await uploadPinImage(pinId, file, 'photo', setSyncProgress);
       const pin = pins.find((item) => item.id === pinId);
       if (!pin) return;
 
@@ -334,6 +377,7 @@ function App() {
       setAppError(`Photo upload failed. ${getErrorMessage(error)}`);
     } finally {
       setIsSaving(false);
+      setSyncProgress(null);
     }
   }, [pins]);
 
@@ -370,10 +414,14 @@ function App() {
   }, [pins]);
 
   const handleBackToMap = useCallback(() => {
+    if (isSaving) {
+      setAppError('Sync in progress. Please wait before leaving this view.');
+      return;
+    }
     setSelectedPinId(null);
     setShowAlbum(false);
     setShowSlideshow(false);
-  }, []);
+  }, [isSaving]);
 
   if (!authReady) {
     return (
@@ -402,6 +450,7 @@ function App() {
           <input
             type="password"
             placeholder="Password"
+            autoComplete="current-password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             required
@@ -424,7 +473,17 @@ function App() {
           <MapPin className="nav-logo-icon" />
           <span>PhotoGlobe</span>
         </div>
-        {isSaving && <span className="save-indicator">Syncing...</span>}
+        <div className="session-debug">{(user.email || 'unknown')} · {import.meta.env.VITE_FIREBASE_PROJECT_ID || 'no-project-id'}</div>
+        {isSaving && (
+          <div className="save-indicator">
+            <span>{syncMessage} {syncProgress !== null ? `${syncProgress}%` : ''}</span>
+            {syncProgress !== null && (
+              <div className="save-progress-track">
+                <div className="save-progress-fill" style={{ width: `${syncProgress}%` }} />
+              </div>
+            )}
+          </div>
+        )}
         <div className="nav-links">
           <button onClick={handleBackToMap} className={!selectedPin && !showAlbum && !showSlideshow ? 'active' : ''}>
             <MapPin size={16} />
@@ -501,6 +560,8 @@ function App() {
             onAddSong={handleAddSong}
             onAddPhoto={handleAddPhoto}
             onRemovePhoto={handleRemovePhoto}
+            isSyncing={isSaving}
+            syncProgress={syncProgress}
           />
         )}
 
