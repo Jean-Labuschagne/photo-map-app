@@ -1,11 +1,16 @@
 import { useState, useRef, useCallback } from 'react';
 import { X, Upload, MapPin } from 'lucide-react';
-import type { PhotoPin } from '../App';
 
 interface AddPinModalProps {
   lat: number;
   lng: number;
-  onAdd: (pin: PhotoPin) => void;
+  onAdd: (pinInput: {
+    lat: number;
+    lng: number;
+    name: string;
+    subtitle: string;
+    thumbnailFile: File | null;
+  }) => void;
   onCancel: () => void;
 }
 
@@ -13,12 +18,14 @@ const AddPinModal = ({ lat, lng, onAdd, onCancel }: AddPinModalProps) => {
   const [placeName, setPlaceName] = useState('');
   const [subtitle, setSubtitle] = useState('');
   const [thumbnail, setThumbnail] = useState<string | null>(null);
+  const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setThumbnailFile(file);
       const reader = new FileReader();
       reader.onload = (event) => {
         if (event.target?.result) {
@@ -35,6 +42,7 @@ const AddPinModal = ({ lat, lng, onAdd, onCancel }: AddPinModalProps) => {
     
     const file = e.dataTransfer.files[0];
     if (file && file.type.startsWith('image/')) {
+      setThumbnailFile(file);
       const reader = new FileReader();
       reader.onload = (event) => {
         if (event.target?.result) {
@@ -60,19 +68,14 @@ const AddPinModal = ({ lat, lng, onAdd, onCancel }: AddPinModalProps) => {
     
     if (!placeName.trim()) return;
 
-    const newPin: PhotoPin = {
-      id: Date.now().toString(),
+    onAdd({
       lat,
       lng,
       name: placeName.trim(),
       subtitle: subtitle.trim() || 'New Location',
-      photoCount: thumbnail ? 1 : 0,
-      thumbnail: thumbnail || `https://picsum.photos/200/200?random=${Date.now()}`,
-      photos: thumbnail ? [thumbnail] : [],
-    };
-
-    onAdd(newPin);
-  }, [placeName, subtitle, thumbnail, lat, lng, onAdd]);
+      thumbnailFile,
+    });
+  }, [placeName, subtitle, thumbnailFile, lat, lng, onAdd]);
 
   return (
     <div className="modal-overlay" onClick={onCancel}>
@@ -111,6 +114,7 @@ const AddPinModal = ({ lat, lng, onAdd, onCancel }: AddPinModalProps) => {
                   onClick={(e) => {
                     e.stopPropagation();
                     setThumbnail(null);
+                    setThumbnailFile(null);
                   }}
                 >
                   <X size={16} />

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import Map from './components/Map';
 import AlbumGrid from './components/AlbumGrid';
 import Slideshow from './components/Slideshow';
@@ -6,6 +6,19 @@ import OptionCard from './components/OptionCard';
 import AddPinModal from './components/AddPinModal';
 import SpotifyPanel from './components/SpotifyPanel';
 import { MapPin, Image, Play, Plus, X } from 'lucide-react';
+import { onAuthStateChanged, signInWithEmailAndPassword, type User, signOut } from 'firebase/auth';
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
+import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
+import { auth, db, storage } from './lib/firebase';
 import './App.css';
 
 export interface PhotoPin {
@@ -27,66 +40,118 @@ export interface PhotoPin {
   };
 }
 
-const initialPins: PhotoPin[] = [
-  {
-    id: '1',
-    lat: -33.9249,
-    lng: 18.4241,
-    name: 'Cape Town',
-    subtitle: 'Western Cape, South Africa',
-    photoCount: 12,
-    thumbnail: 'https://images.unsplash.com/photo-1580060839134-75a5edca2e99?w=200&h=200&fit=crop',
-    photos: [
-      'https://images.unsplash.com/photo-1580060839134-75a5edca2e99?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1576485290814-1c72aa4bbb8e?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1516026672322-bc52d61a55d5?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1506953823976-52e1fdc0149a?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1476514525535-07fb3b4ae5f1?w=800&fit=crop',
-    ],
-  },
-  {
-    id: '2',
-    lat: -25.7461,
-    lng: 28.1881,
-    name: 'Pretoria',
-    subtitle: 'Gauteng, South Africa',
-    photoCount: 8,
-    thumbnail: 'https://images.unsplash.com/photo-1596325066347-68b32d207327?w=200&h=200&fit=crop',
-    photos: [
-      'https://images.unsplash.com/photo-1596325066347-68b32d207327?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=800&fit=crop',
-    ],
-  },
-  {
-    id: '3',
-    lat: -26.2041,
-    lng: 28.0473,
-    name: 'Johannesburg',
-    subtitle: 'Gauteng, South Africa',
-    photoCount: 15,
-    thumbnail: 'https://images.unsplash.com/photo-1615112836250-9a4f492b45e8?w=200&h=200&fit=crop',
-    photos: [
-      'https://images.unsplash.com/photo-1615112836250-9a4f492b45e8?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?w=800&fit=crop',
-      'https://images.unsplash.com/photo-1449824913935-59a10b8d2000?w=800&fit=crop',
-    ],
-  },
-];
+const ALLOWED_EMAILS = new Set([
+  'jeanlabus.jl65@gmail.com',
+  'ankesmith0@gmail.com',
+]);
+
+const getFallbackThumbnail = (seed: string) => `https://picsum.photos/seed/${seed}/200/200`;
+
+const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'photo') => {
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storageRef = ref(storage, `pins/${pinId}/${prefix}-${Date.now()}-${safeName}`);
+  await uploadBytes(storageRef, file);
+  return getDownloadURL(storageRef);
+};
 
 function App() {
-  const [pins, setPins] = useState<PhotoPin[]>(initialPins);
-  const [selectedPin, setSelectedPin] = useState<PhotoPin | null>(null);
+  const [pins, setPins] = useState<PhotoPin[]>([]);
+  const [selectedPinId, setSelectedPinId] = useState<string | null>(null);
   const [showAlbum, setShowAlbum] = useState(false);
   const [showSlideshow, setShowSlideshow] = useState(false);
   const [showSpotifyPanel, setShowSpotifyPanel] = useState(false);
   const [isAddingPin, setIsAddingPin] = useState(false);
   const [showAddPinModal, setShowAddPinModal] = useState(false);
   const [newPinLocation, setNewPinLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [appError, setAppError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  const selectedPin = useMemo(
+    () => pins.find((pin) => pin.id === selectedPinId) || null,
+    [pins, selectedPinId]
+  );
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
+      if (nextUser && nextUser.email && !ALLOWED_EMAILS.has(nextUser.email)) {
+        await signOut(auth);
+        setUser(null);
+        setAuthError('This account is not authorized for this app.');
+        setAuthReady(true);
+        return;
+      }
+
+      setUser(nextUser);
+      setAuthReady(true);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setPins([]);
+      setSelectedPinId(null);
+      return;
+    }
+
+    const pinsQuery = query(collection(db, 'pins'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(
+      pinsQuery,
+      (snapshot) => {
+        const nextPins: PhotoPin[] = snapshot.docs.map((pinDoc) => {
+          const data = pinDoc.data() as any;
+          const photos = Array.isArray(data.photos) ? data.photos : [];
+          const fallbackThumbnail = getFallbackThumbnail(pinDoc.id);
+
+          return {
+            id: pinDoc.id,
+            lat: Number(data.lat || 0),
+            lng: Number(data.lng || 0),
+            name: data.name || 'Untitled',
+            subtitle: data.subtitle || 'New Location',
+            photoCount: Number(data.photoCount || photos.length || 0),
+            thumbnail: data.thumbnail || photos[0] || fallbackThumbnail,
+            photos,
+            song: data.song || undefined,
+          };
+        });
+
+        setPins(nextPins);
+
+        if (selectedPinId && !nextPins.find((pin) => pin.id === selectedPinId)) {
+          setSelectedPinId(null);
+          setShowAlbum(false);
+          setShowSlideshow(false);
+        }
+      },
+      () => {
+        setAppError('Unable to load locations from Firebase. Check Firestore rules and indexes.');
+      }
+    );
+
+    return unsubscribe;
+  }, [user, selectedPinId]);
+
+  const handleSignIn = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+      setPassword('');
+    } catch {
+      setAuthError('Sign-in failed. Check your email and password.');
+    }
+  }, [email, password]);
 
   const handlePinClick = useCallback((pin: PhotoPin) => {
-    setSelectedPin(pin);
+    setSelectedPinId(pin.id);
     setShowAlbum(false);
     setShowSlideshow(false);
   }, []);
@@ -114,20 +179,21 @@ function App() {
   }, []);
 
   const handleSongSelect = useCallback((song: { id: string; title: string; artist: string; previewUrl: string | null; spotifyUrl: string; startTime: number }) => {
-    if (selectedPin) {
-      setPins(prev => prev.map(p => 
-        p.id === selectedPin.id 
-          ? { ...p, song }
-          : p
-      ));
-      setSelectedPin(prev => prev ? { ...prev, song } : null);
-    }
+    if (!selectedPinId) return;
+
+    updateDoc(doc(db, 'pins', selectedPinId), {
+      song,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {
+      setAppError('Failed to save song. Please try again.');
+    });
+
     setShowSpotifyPanel(false);
-  }, [selectedPin]);
+  }, [selectedPinId]);
 
   const handleAddPinClick = useCallback(() => {
     setIsAddingPin(true);
-    setSelectedPin(null);
+    setSelectedPinId(null);
     setShowAlbum(false);
     setShowSlideshow(false);
   }, []);
@@ -140,12 +206,53 @@ function App() {
     }
   }, [isAddingPin]);
 
-  const handleAddPin = useCallback((newPin: PhotoPin) => {
-    setPins(prev => [...prev, newPin]);
-    setShowAddPinModal(false);
-    setNewPinLocation(null);
-    setSelectedPin(newPin);
-  }, []);
+  const handleAddPin = useCallback(async (pinInput: {
+    lat: number;
+    lng: number;
+    name: string;
+    subtitle: string;
+    thumbnailFile: File | null;
+  }) => {
+    if (!user) return;
+
+    setIsSaving(true);
+    setAppError(null);
+
+    try {
+      const pinRef = doc(collection(db, 'pins'));
+      const fallbackThumbnail = getFallbackThumbnail(pinRef.id);
+      let thumbnail = fallbackThumbnail;
+      const photos: string[] = [];
+
+      if (pinInput.thumbnailFile) {
+        const thumbUrl = await uploadPinImage(pinRef.id, pinInput.thumbnailFile, 'thumb');
+        thumbnail = thumbUrl;
+        photos.push(thumbUrl);
+      }
+
+      await setDoc(pinRef, {
+        lat: pinInput.lat,
+        lng: pinInput.lng,
+        name: pinInput.name,
+        subtitle: pinInput.subtitle,
+        photoCount: photos.length,
+        thumbnail,
+        photos,
+        song: null,
+        createdBy: user.email || 'unknown',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      setSelectedPinId(pinRef.id);
+      setShowAddPinModal(false);
+      setNewPinLocation(null);
+    } catch {
+      setAppError('Failed to add location. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [user]);
 
   const handleCancelAddPin = useCallback(() => {
     setShowAddPinModal(false);
@@ -153,43 +260,104 @@ function App() {
     setIsAddingPin(false);
   }, []);
 
-  const handleAddPhoto = useCallback((pinId: string, photoUrl: string) => {
-    setPins(prev => prev.map(p => 
-      p.id === pinId 
-        ? { ...p, photos: [...p.photos, photoUrl], photoCount: p.photoCount + 1 }
-        : p
-    ));
-    if (selectedPin?.id === pinId) {
-      setSelectedPin(prev => prev ? { 
-        ...prev, 
-        photos: [...prev.photos, photoUrl],
-        photoCount: prev.photoCount + 1 
-      } : null);
-    }
-  }, [selectedPin]);
+  const handleAddPhoto = useCallback(async (pinId: string, file: File) => {
+    setIsSaving(true);
+    setAppError(null);
 
-  const handleRemovePhoto = useCallback((pinId: string, photoIndex: number) => {
-    setPins(prev => prev.map(p => {
-      if (p.id === pinId) {
-        const newPhotos = p.photos.filter((_, i) => i !== photoIndex);
-        return { ...p, photos: newPhotos, photoCount: newPhotos.length };
-      }
-      return p;
-    }));
-    if (selectedPin?.id === pinId) {
-      setSelectedPin(prev => {
-        if (!prev) return null;
-        const newPhotos = prev.photos.filter((_, i) => i !== photoIndex);
-        return { ...prev, photos: newPhotos, photoCount: newPhotos.length };
+    try {
+      const photoUrl = await uploadPinImage(pinId, file, 'photo');
+      const pin = pins.find((item) => item.id === pinId);
+      if (!pin) return;
+
+      const nextPhotos = [...pin.photos, photoUrl];
+      await updateDoc(doc(db, 'pins', pinId), {
+        photos: nextPhotos,
+        photoCount: nextPhotos.length,
+        thumbnail: pin.thumbnail || photoUrl,
+        updatedAt: serverTimestamp(),
       });
+    } catch {
+      setAppError('Photo upload failed. Please try again.');
+    } finally {
+      setIsSaving(false);
     }
-  }, [selectedPin]);
+  }, [pins]);
+
+  const handleRemovePhoto = useCallback(async (pinId: string, photoIndex: number) => {
+    const pin = pins.find((item) => item.id === pinId);
+    if (!pin) return;
+
+    const removedPhotoUrl = pin.photos[photoIndex];
+    const nextPhotos = pin.photos.filter((_, index) => index !== photoIndex);
+
+    setIsSaving(true);
+    setAppError(null);
+
+    try {
+      await updateDoc(doc(db, 'pins', pinId), {
+        photos: nextPhotos,
+        photoCount: nextPhotos.length,
+        thumbnail: nextPhotos[0] || getFallbackThumbnail(pinId),
+        updatedAt: serverTimestamp(),
+      });
+
+      if (removedPhotoUrl?.includes('firebasestorage.googleapis.com')) {
+        try {
+          await deleteObject(ref(storage, removedPhotoUrl));
+        } catch {
+          // Ignore storage delete failures after Firestore update succeeds.
+        }
+      }
+    } catch {
+      setAppError('Failed to remove photo. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [pins]);
 
   const handleBackToMap = useCallback(() => {
-    setSelectedPin(null);
+    setSelectedPinId(null);
     setShowAlbum(false);
     setShowSlideshow(false);
   }, []);
+
+  if (!authReady) {
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <h1>PhotoGlobe</h1>
+          <p>Preparing your private album...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="auth-screen">
+        <form className="auth-card" onSubmit={handleSignIn}>
+          <h1>PhotoGlobe</h1>
+          <p>Sign in to your shared album.</p>
+          <input
+            type="email"
+            placeholder="Email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            required
+          />
+          <input
+            type="password"
+            placeholder="Password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+          />
+          {authError && <p className="auth-error">{authError}</p>}
+          <button type="submit">Sign In</button>
+        </form>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
@@ -202,6 +370,7 @@ function App() {
           <MapPin className="nav-logo-icon" />
           <span>PhotoGlobe</span>
         </div>
+        {isSaving && <span className="save-indicator">Syncing...</span>}
         <div className="nav-links">
           <button onClick={handleBackToMap} className={!selectedPin && !showAlbum && !showSlideshow ? 'active' : ''}>
             <MapPin size={16} />
@@ -228,6 +397,7 @@ function App() {
 
       {/* Main Content */}
       <main className="main-content">
+        {appError && <div className="app-error-banner">{appError}</div>}
         {/* Map View */}
         {!showAlbum && !showSlideshow && (
           <div className="map-view">

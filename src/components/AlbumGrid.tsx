@@ -6,7 +6,7 @@ interface AlbumGridProps {
   pin: PhotoPin;
   onClose: () => void;
   onAddSong: () => void;
-  onAddPhoto: (pinId: string, photoUrl: string) => void;
+  onAddPhoto: (pinId: string, file: File) => void;
   onRemovePhoto: (pinId: string, photoIndex: number) => void;
 }
 
@@ -19,13 +19,9 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
     const files = e.target.files;
     if (files) {
       Array.from(files).forEach(file => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          if (event.target?.result) {
-            onAddPhoto(pin.id, event.target.result as string);
-          }
-        };
-        reader.readAsDataURL(file);
+        if (file.type.startsWith('image/')) {
+          onAddPhoto(pin.id, file);
+        }
       });
     }
   }, [pin.id, onAddPhoto]);
@@ -37,13 +33,7 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto }: Album
     const files = e.dataTransfer.files;
     Array.from(files).forEach(file => {
       if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          if (event.target?.result) {
-            onAddPhoto(pin.id, event.target.result as string);
-          }
-        };
-        reader.readAsDataURL(file);
+        onAddPhoto(pin.id, file);
       }
     });
   }, [pin.id, onAddPhoto]);
