@@ -16,8 +16,11 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const configuredBucket = (firebaseConfig.storageBucket || '').trim();
 const appspotBucket = `${firebaseConfig.projectId}.appspot.com`;
-const primaryBucket = configuredBucket || appspotBucket;
-const secondaryBucket = primaryBucket === appspotBucket ? null : appspotBucket;
+const normalizedBucket = configuredBucket.endsWith('.firebasestorage.app')
+  ? appspotBucket
+  : configuredBucket;
+const primaryBucket = normalizedBucket || appspotBucket;
+const secondaryBucket = primaryBucket === appspotBucket ? configuredBucket || null : appspotBucket;
 
 export const auth = getAuth(app);
 export const db = getFirestore(app);

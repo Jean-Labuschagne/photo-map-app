@@ -101,7 +101,10 @@ const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'phot
   }
 
   if (lastError) {
-    throw lastError;
+    const bucketNames = candidates
+      .map((candidate) => candidate.app.options.storageBucket || 'unknown-bucket')
+      .join(', ');
+    throw new Error(`${getErrorMessage(lastError)} (Buckets tried: ${bucketNames})`);
   }
 
   throw new Error('No storage bucket candidates available.');
