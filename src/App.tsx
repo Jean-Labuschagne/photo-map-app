@@ -167,6 +167,16 @@ function App() {
   const [syncMessage, setSyncMessage] = useState('Syncing...');
   const [firestoreHealth, setFirestoreHealth] = useState<'unknown' | 'ok' | 'failed'>('unknown');
   const [firestoreHealthMessage, setFirestoreHealthMessage] = useState<string | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(true);
+  const [lastFirestoreError, setLastFirestoreError] = useState<string | null>(null);
+  const [lastStorageError, setLastStorageError] = useState<string | null>(null);
+  const [lastAction, setLastAction] = useState('idle');
+  const [lastActionAt, setLastActionAt] = useState<string | null>(null);
+
+  const markAction = useCallback((action: string) => {
+    setLastAction(action);
+    setLastActionAt(new Date().toISOString());
+  }, []);
 
   const selectedPin = useMemo(
     () => pins.find((pin) => pin.id === selectedPinId) || null,
@@ -210,6 +220,7 @@ function App() {
       })
       .catch((error) => {
         setFirestoreHealth('failed');
+        setLastFirestoreError(getErrorMessage(error));
         setFirestoreHealthMessage(
           `Firestore connection issue: ${getErrorMessage(error)}. Check Vercel Firebase env vars and Firestore initialization for ${import.meta.env.VITE_FIREBASE_PROJECT_ID || 'unknown-project'}.`
         );
@@ -247,6 +258,7 @@ function App() {
       },
       (error) => {
         setFirestoreHealth('failed');
+        setLastFirestoreError(getErrorMessage(error));
         setFirestoreHealthMessage(`Firestore live sync failed: ${getErrorMessage(error)}`);
         setAppError('Unable to load locations from Firebase. Check Firestore rules and indexes.');
       }
@@ -317,6 +329,7 @@ function App() {
       }),
       'Saving song'
     ).catch((error) => {
+      setLastFirestoreError(getErrorMessage(error));
       setAppError(`Failed to save song. ${getErrorMessage(error)}`);
     });
 
@@ -355,6 +368,7 @@ function App() {
     setSyncMessage('Saving location...');
     setSyncProgress(null);
     setAppError(null);
+    markAction('add-pin:start');
 
     try {
       const pinRef = doc(collection(db, 'pins'));
@@ -363,11 +377,13 @@ function App() {
       const photos: string[] = [];
 
       if (pinInput.thumbnailFile) {
+        setSyncMessage('Uploading thumbnail...');
         const thumbUrl = await uploadPinImage(pinRef.id, pinInput.thumbnailFile, 'thumb', setSyncProgress);
         thumbnail = thumbUrl;
         photos.push(thumbUrl);
       }
 
+      setSyncMessage('Saving pin metadata...');
       await withTimeout(
         setDoc(pinRef, {
           lat: pinInput.lat,
@@ -388,8 +404,17 @@ function App() {
       setSelectedPinId(pinRef.id);
       setShowAddPinModal(false);
       setNewPinLocation(null);
+      markAction('add-pin:success');
     } catch (error) {
+      const message = getErrorMessage(error);
+      if (message.toLowerCase().includes('upload') || message.toLowerCase().includes('storage')) {
+        setLastStorageError(message);
+      }
+      if (message.toLowerCase().includes('saving pin data') || message.toLowerCase().includes('firestore')) {
+        setLastFirestoreError(message);
+      }
       setAppError(`Failed to add location. ${getErrorMessage(error)}`);
+      markAction('add-pin:failed');
     } finally {
       setIsSaving(false);
       setSyncProgress(null);
@@ -407,6 +432,7 @@ function App() {
     setSyncMessage('Uploading photo...');
     setSyncProgress(0);
     setAppError(null);
+    markAction('add-photo:start');
 
     try {
       const photoUrl = await uploadPinImage(pinId, file, 'photo', setSyncProgress);
@@ -423,13 +449,22 @@ function App() {
         }),
         'Saving photo metadata'
       );
+      markAction('add-photo:success');
     } catch (error) {
+      const message = getErrorMessage(error);
+      if (message.toLowerCase().includes('upload') || message.toLowerCase().includes('storage')) {
+        setLastStorageError(message);
+      }
+      if (message.toLowerCase().includes('saving photo metadata') || message.toLowerCase().includes('firestore')) {
+        setLastFirestoreError(message);
+      }
       setAppError(`Photo upload failed. ${getErrorMessage(error)}`);
+      markAction('add-photo:failed');
     } finally {
       setIsSaving(false);
       setSyncProgress(null);
     }
-  }, [pins]);
+  }, [pins, markAction]);
 
   const handleRemovePhoto = useCallback(async (pinId: string, photoIndex: number) => {
     const pin = pins.find((item) => item.id === pinId);
@@ -440,6 +475,7 @@ function App() {
 
     setIsSaving(true);
     setAppError(null);
+    markAction('remove-photo:start');
 
     try {
       await withTimeout(
@@ -459,12 +495,15 @@ function App() {
           // Ignore storage delete failures after Firestore update succeeds.
         }
       }
+      markAction('remove-photo:success');
     } catch (error) {
+      setLastFirestoreError(getErrorMessage(error));
       setAppError(`Failed to remove photo. ${getErrorMessage(error)}`);
+      markAction('remove-photo:failed');
     } finally {
       setIsSaving(false);
     }
-  }, [pins]);
+  }, [pins, markAction]);
 
   const handleBackToMap = useCallback(() => {
     if (isSaving) {
@@ -647,6 +686,27 @@ function App() {
           onCancel={handleCancelAddPin}
         />
       )}
+
+      <section className="diagnostics-panel">
+        <button className="diagnostics-toggle" onClick={() => setShowDiagnostics((value) => !value)}>
+          {showDiagnostics ? 'Hide Diagnostics' : 'Show Diagnostics'}
+        </button>
+        {showDiagnostics && (
+          <div className="diagnostics-body">
+            <p><strong>Project:</strong> {import.meta.env.VITE_FIREBASE_PROJECT_ID || 'n/a'}</p>
+            <p><strong>Auth Domain:</strong> {import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'n/a'}</p>
+            <p><strong>Storage Bucket (env):</strong> {import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'n/a'}</p>
+            <p><strong>Buckets Tried:</strong> {STORAGE_BUCKET_CANDIDATES.join(', ')}</p>
+            <p><strong>User:</strong> {user.email || 'n/a'}</p>
+            <p><strong>Firestore Health:</strong> {firestoreHealth}</p>
+            <p><strong>Last Action:</strong> {lastAction}</p>
+            <p><strong>Last Action At:</strong> {lastActionAt || 'n/a'}</p>
+            <p><strong>Last Firestore Error:</strong> {lastFirestoreError || 'none'}</p>
+            <p><strong>Last Storage Error:</strong> {lastStorageError || 'none'}</p>
+            <p><strong>Health Message:</strong> {firestoreHealthMessage || 'none'}</p>
+          </div>
+        )}
+      </section>
     </div>
   );
 }
