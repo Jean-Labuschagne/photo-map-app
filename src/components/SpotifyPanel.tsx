@@ -17,7 +17,7 @@ interface SpotifyPanelProps {
   onSelect: (song: { id: string; title: string; artist: string; previewUrl: string | null; spotifyUrl: string; startTime: number }) => void;
 }
 
-const SPOTIFY_PROXY_URL = 'http://localhost:8787';
+const SPOTIFY_API_BASE = import.meta.env.VITE_SPOTIFY_API_BASE || '/api/spotify';
 
 const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
   const [query, setQuery] = useState('');
@@ -34,7 +34,7 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
   useEffect(() => {
     const checkSpotifyHealth = async () => {
       try {
-        const response = await fetch(`${SPOTIFY_PROXY_URL}/api/spotify/health`);
+        const response = await fetch(`${SPOTIFY_API_BASE}/health`);
 
         if (!response.ok) {
           throw new Error('Spotify proxy is not configured');
@@ -44,7 +44,7 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
         setAuthError(null);
       } catch (error) {
         setIsSpotifyReady(false);
-        setAuthError('Spotify is not ready. Start the proxy server and configure server credentials.');
+        setAuthError('Spotify is not ready. Ensure server API routes are running and credentials are configured.');
       }
     };
 
@@ -55,7 +55,7 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
   const searchTracks = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim() || !isSpotifyReady) {
       if (!isSpotifyReady) {
-        setAuthError('Spotify proxy is unavailable');
+        setAuthError('Spotify service is unavailable');
       }
       setResults([]);
       return;
@@ -65,10 +65,10 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
     setAuthError(null);
 
     try {
-      const response = await fetch(`${SPOTIFY_PROXY_URL}/api/spotify/search?q=${encodeURIComponent(searchQuery)}&limit=10`);
+      const response = await fetch(`${SPOTIFY_API_BASE}/search?q=${encodeURIComponent(searchQuery)}&limit=10`);
 
       if (!response.ok) {
-        setAuthError('Spotify search failed. Check proxy server logs.');
+        setAuthError('Spotify search failed. Check server logs and credentials.');
         throw new Error('Search failed');
       }
 
@@ -196,7 +196,7 @@ const SpotifyPanel = ({ onClose, onSelect }: SpotifyPanelProps) => {
               <ol>
                 <li>Create <strong>app/.env</strong> from <strong>app/.env.example</strong></li>
                 <li>Add <strong>SPOTIFY_CLIENT_ID</strong> and <strong>SPOTIFY_CLIENT_SECRET</strong></li>
-                <li>Run <strong>npm run dev</strong> so the Spotify proxy starts</li>
+                <li>For local dev, run <strong>npm run dev</strong>; for Vercel, set these in Project Environment Variables</li>
               </ol>
             </div>
           </div>
