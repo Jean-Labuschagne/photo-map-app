@@ -67,7 +67,7 @@ const uploadBytesWithTimeout = async (
   storageRef: ReturnType<typeof ref>,
   file: File,
   onProgress?: (progress: number) => void,
-  timeoutMs = 8000
+  timeoutMs = 45000
 ) => {
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const uploadTask = uploadBytesResumable(storageRef, file);
@@ -98,6 +98,14 @@ const uploadBytesWithTimeout = async (
       clearTimeout(timeoutHandle);
     }
   }
+};
+
+const getUploadTimeoutMs = (file: File) => {
+  const sizeMb = file.size / (1024 * 1024);
+  const perMbMs = 12000;
+  const baseMs = 30000;
+  const computed = Math.round(baseMs + sizeMb * perMbMs);
+  return Math.min(Math.max(computed, 30000), 180000);
 };
 
 async function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 12000): Promise<T> {
@@ -132,7 +140,7 @@ const uploadPinImage = async (
   for (const candidate of candidates) {
     try {
       const candidateRef = ref(candidate, objectPath);
-      await uploadBytesWithTimeout(candidateRef, file, onProgress);
+      await uploadBytesWithTimeout(candidateRef, file, onProgress, getUploadTimeoutMs(file));
       return getDownloadURL(candidateRef);
     } catch (error) {
       lastError = error;
