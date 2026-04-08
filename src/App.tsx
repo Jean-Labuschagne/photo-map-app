@@ -98,6 +98,23 @@ const uploadBytesWithTimeout = async (
   }
 };
 
+async function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = 12000): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeoutPromise = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = setTimeout(() => {
+        reject(new Error(`${label} timed out. Please try again.`));
+      }, timeoutMs);
+    });
+
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
 const uploadPinImage = async (
   pinId: string,
   file: File,
@@ -269,11 +286,14 @@ function App() {
   const handleSongSelect = useCallback((song: { id: string; title: string; artist: string; previewUrl: string | null; spotifyUrl: string; startTime: number }) => {
     if (!selectedPinId) return;
 
-    updateDoc(doc(db, 'pins', selectedPinId), {
-      song,
-      updatedAt: serverTimestamp(),
-    }).catch(() => {
-      setAppError('Failed to save song. Please try again.');
+    withTimeout(
+      updateDoc(doc(db, 'pins', selectedPinId), {
+        song,
+        updatedAt: serverTimestamp(),
+      }),
+      'Saving song'
+    ).catch((error) => {
+      setAppError(`Failed to save song. ${getErrorMessage(error)}`);
     });
 
     setShowSpotifyPanel(false);
@@ -324,19 +344,22 @@ function App() {
         photos.push(thumbUrl);
       }
 
-      await setDoc(pinRef, {
-        lat: pinInput.lat,
-        lng: pinInput.lng,
-        name: pinInput.name,
-        subtitle: pinInput.subtitle,
-        photoCount: photos.length,
-        thumbnail,
-        photos,
-        song: null,
-        createdBy: user.email || 'unknown',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await withTimeout(
+        setDoc(pinRef, {
+          lat: pinInput.lat,
+          lng: pinInput.lng,
+          name: pinInput.name,
+          subtitle: pinInput.subtitle,
+          photoCount: photos.length,
+          thumbnail,
+          photos,
+          song: null,
+          createdBy: user.email || 'unknown',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }),
+        'Saving pin data'
+      );
 
       setSelectedPinId(pinRef.id);
       setShowAddPinModal(false);
@@ -367,12 +390,15 @@ function App() {
       if (!pin) return;
 
       const nextPhotos = [...pin.photos, photoUrl];
-      await updateDoc(doc(db, 'pins', pinId), {
-        photos: nextPhotos,
-        photoCount: nextPhotos.length,
-        thumbnail: pin.thumbnail || photoUrl,
-        updatedAt: serverTimestamp(),
-      });
+      await withTimeout(
+        updateDoc(doc(db, 'pins', pinId), {
+          photos: nextPhotos,
+          photoCount: nextPhotos.length,
+          thumbnail: pin.thumbnail || photoUrl,
+          updatedAt: serverTimestamp(),
+        }),
+        'Saving photo metadata'
+      );
     } catch (error) {
       setAppError(`Photo upload failed. ${getErrorMessage(error)}`);
     } finally {
@@ -392,12 +418,15 @@ function App() {
     setAppError(null);
 
     try {
-      await updateDoc(doc(db, 'pins', pinId), {
-        photos: nextPhotos,
-        photoCount: nextPhotos.length,
-        thumbnail: nextPhotos[0] || getFallbackThumbnail(pinId),
-        updatedAt: serverTimestamp(),
-      });
+      await withTimeout(
+        updateDoc(doc(db, 'pins', pinId), {
+          photos: nextPhotos,
+          photoCount: nextPhotos.length,
+          thumbnail: nextPhotos[0] || getFallbackThumbnail(pinId),
+          updatedAt: serverTimestamp(),
+        }),
+        'Removing photo metadata'
+      );
 
       if (removedPhotoUrl?.includes('firebasestorage.googleapis.com')) {
         try {
