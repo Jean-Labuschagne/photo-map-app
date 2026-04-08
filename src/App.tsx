@@ -18,7 +18,7 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { deleteObject, getDownloadURL, ref, uploadBytes } from 'firebase/storage';
-import { auth, db, storage } from './lib/firebase';
+import { auth, db, storage, storageFallback } from './lib/firebase';
 import './App.css';
 
 export interface PhotoPin {
@@ -47,11 +47,33 @@ const ALLOWED_EMAILS = new Set([
 
 const getFallbackThumbnail = (seed: string) => `https://picsum.photos/seed/${seed}/200/200`;
 
+const getErrorMessage = (error: unknown) => {
+  if (typeof error === 'object' && error !== null) {
+    const maybeCode = (error as { code?: string }).code;
+    const maybeMessage = (error as { message?: string }).message;
+    if (maybeCode && maybeMessage) {
+      return `${maybeCode}: ${maybeMessage}`;
+    }
+    if (maybeMessage) {
+      return maybeMessage;
+    }
+  }
+  return 'Unknown error';
+};
+
 const uploadPinImage = async (pinId: string, file: File, prefix: 'thumb' | 'photo') => {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const storageRef = ref(storage, `pins/${pinId}/${prefix}-${Date.now()}-${safeName}`);
-  await uploadBytes(storageRef, file);
-  return getDownloadURL(storageRef);
+  const objectPath = `pins/${pinId}/${prefix}-${Date.now()}-${safeName}`;
+
+  try {
+    const primaryRef = ref(storage, objectPath);
+    await uploadBytes(primaryRef, file);
+    return getDownloadURL(primaryRef);
+  } catch {
+    const fallbackRef = ref(storageFallback, objectPath);
+    await uploadBytes(fallbackRef, file);
+    return getDownloadURL(fallbackRef);
+  }
 };
 
 function App() {
@@ -247,8 +269,8 @@ function App() {
       setSelectedPinId(pinRef.id);
       setShowAddPinModal(false);
       setNewPinLocation(null);
-    } catch {
-      setAppError('Failed to add location. Please try again.');
+    } catch (error) {
+      setAppError(`Failed to add location. ${getErrorMessage(error)}`);
     } finally {
       setIsSaving(false);
     }
@@ -276,8 +298,8 @@ function App() {
         thumbnail: pin.thumbnail || photoUrl,
         updatedAt: serverTimestamp(),
       });
-    } catch {
-      setAppError('Photo upload failed. Please try again.');
+    } catch (error) {
+      setAppError(`Photo upload failed. ${getErrorMessage(error)}`);
     } finally {
       setIsSaving(false);
     }
@@ -308,8 +330,8 @@ function App() {
           // Ignore storage delete failures after Firestore update succeeds.
         }
       }
-    } catch {
-      setAppError('Failed to remove photo. Please try again.');
+    } catch (error) {
+      setAppError(`Failed to remove photo. ${getErrorMessage(error)}`);
     } finally {
       setIsSaving(false);
     }
