@@ -31,7 +31,7 @@ const secondaryBucket = STORAGE_BUCKET_CANDIDATES.length > 1 ? STORAGE_BUCKET_CA
 
 export const auth = getAuth(app);
 export const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
+  experimentalForceLongPolling: true,
 });
 export const storage = getStorage(app, `gs://${primaryBucket}`);
 export const storageFallback = secondaryBucket ? getStorage(app, `gs://${secondaryBucket}`) : null;
