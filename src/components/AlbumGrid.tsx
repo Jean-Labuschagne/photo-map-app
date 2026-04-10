@@ -1,46 +1,62 @@
 import { useState, useRef, useCallback } from 'react';
 import { X, Plus, Music, ArrowLeft, Trash2, Upload } from 'lucide-react';
-import type { PhotoPin } from '../App';
+import type { OptimisticPhotoPreview, PhotoPin, UploadBatchSummary, UploadItemProgress } from '../App';
 
 interface AlbumGridProps {
   pin: PhotoPin;
   onClose: () => void;
   onAddSong: () => void;
-  onAddPhoto: (pinId: string, file: File) => void;
+  onAddPhotos: (pinId: string, files: File[]) => void;
   onRemovePhoto: (pinId: string, photoIndex: number) => void;
   isSyncing?: boolean;
   syncProgress?: number | null;
+  uploadItems?: UploadItemProgress[];
+  uploadStatusLabel?: string | null;
+  uploadSummary?: UploadBatchSummary | null;
+  optimisticPhotos?: OptimisticPhotoPreview[];
+  onCancelUpload?: (itemId: string) => void;
+  onRetryFailedUploads?: (pinId: string) => void;
 }
 
-const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto, isSyncing = false, syncProgress = null }: AlbumGridProps) => {
+const AlbumGrid = ({
+  pin,
+  onClose,
+  onAddSong,
+  onAddPhotos,
+  onRemovePhoto,
+  isSyncing = false,
+  syncProgress = null,
+  uploadItems = [],
+  uploadStatusLabel = null,
+  uploadSummary = null,
+  optimisticPhotos = [],
+  onCancelUpload,
+  onRetryFailedUploads,
+}: AlbumGridProps) => {
   const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    if (isSyncing) return;
     const files = e.target.files;
     if (files) {
-      Array.from(files).forEach(file => {
-        if (file.type.startsWith('image/')) {
-          onAddPhoto(pin.id, file);
-        }
-      });
+      const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
+      if (imageFiles.length > 0) {
+        onAddPhotos(pin.id, imageFiles);
+      }
     }
-  }, [pin.id, onAddPhoto, isSyncing]);
+  }, [pin.id, onAddPhotos]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    if (isSyncing) return;
     
     const files = e.dataTransfer.files;
-    Array.from(files).forEach(file => {
-      if (file.type.startsWith('image/')) {
-        onAddPhoto(pin.id, file);
-      }
-    });
-  }, [pin.id, onAddPhoto, isSyncing]);
+    const imageFiles = Array.from(files).filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length > 0) {
+      onAddPhotos(pin.id, imageFiles);
+    }
+  }, [pin.id, onAddPhotos]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -51,6 +67,17 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto, isSynci
     e.preventDefault();
     setIsDragging(false);
   }, []);
+
+  const optimisticUrls = new Set(
+    optimisticPhotos
+      .map((photo) => photo.remoteUrl || photo.displayUrl)
+      .filter((url): url is string => Boolean(url))
+  );
+
+  const persistedPhotos = pin.photos
+    .map((photo, index) => ({ photo, index }))
+    .filter((item) => !optimisticUrls.has(item.photo));
+  const hasFailedUploads = uploadItems.some((item) => item.stage === 'error');
 
   return (
     <section className="album-section">
@@ -90,7 +117,46 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto, isSynci
 
       {isSyncing && (
         <div className="album-sync-status">
-          <span>Syncing upload{syncProgress !== null ? ` (${syncProgress}%)` : '...'}</span>
+          <span>{uploadStatusLabel || `Syncing upload${syncProgress !== null ? ` (${syncProgress}%)` : '...'}`}</span>
+          {syncProgress !== null && <span>Overall progress: {syncProgress}%</span>}
+          {uploadItems.length > 0 && (
+            <div className="album-upload-list">
+              {uploadItems.map((item) => (
+                <div key={item.id} className="album-upload-item">
+                  <span>{item.name}</span>
+                  <span>
+                    {item.stage === 'error'
+                      ? `Failed: ${item.error || 'unknown error'}`
+                      : `${item.stage} ${item.progress}%`}
+                  </span>
+                  {onCancelUpload && item.stage !== 'done' && item.stage !== 'error' && (
+                    <button
+                      type="button"
+                      className="album-cancel-upload-btn"
+                      onClick={() => onCancelUpload(item.id)}
+                    >
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {uploadSummary?.completed && (
+        <div className="album-sync-status">
+          <span>{uploadSummary.succeeded} uploaded, {uploadSummary.failed} failed</span>
+          {hasFailedUploads && onRetryFailedUploads && (
+            <button
+              type="button"
+              className="album-cancel-upload-btn"
+              onClick={() => onRetryFailedUploads(pin.id)}
+            >
+              Retry Failed
+            </button>
+          )}
         </div>
       )}
 
@@ -120,7 +186,7 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto, isSynci
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
       >
-        {pin.photos.length === 0 ? (
+        {optimisticPhotos.length === 0 && persistedPhotos.length === 0 ? (
           <div className="album-empty">
             <Upload size={48} />
             <p>Drop photos here to build your album</p>
@@ -128,19 +194,29 @@ const AlbumGrid = ({ pin, onClose, onAddSong, onAddPhoto, onRemovePhoto, isSynci
           </div>
         ) : (
           <div className="album-grid">
-            {pin.photos.map((photo, index) => (
-              <div 
-                key={index} 
+            {optimisticPhotos.map((photo) => (
+              <div
+                key={photo.id}
                 className="album-grid-item"
-                onClick={() => setSelectedPhoto(photo)}
+                onClick={() => setSelectedPhoto(photo.displayUrl)}
               >
-                <img src={photo} alt={`Photo ${index + 1}`} />
+                <img src={photo.displayUrl} alt={photo.name} />
+                <span className="album-optimistic-badge">{photo.status}</span>
+              </div>
+            ))}
+            {persistedPhotos.map((item) => (
+              <div 
+                key={`${item.photo}-${item.index}`}
+                className="album-grid-item"
+                onClick={() => setSelectedPhoto(item.photo)}
+              >
+                <img src={item.photo} alt={`Photo ${item.index + 1}`} />
                 <button 
                   className="photo-delete-btn"
                   disabled={isSyncing}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onRemovePhoto(pin.id, index);
+                    onRemovePhoto(pin.id, item.index);
                   }}
                 >
                   <Trash2 size={16} />

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import Map from './components/Map';
 import AlbumGrid from './components/AlbumGrid';
 import Slideshow from './components/Slideshow';
@@ -15,6 +15,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
@@ -42,12 +43,110 @@ export interface PhotoPin {
   };
 }
 
+export interface UploadItemProgress {
+  id: string;
+  pinId: string;
+  name: string;
+  progress: number;
+  stage: 'queued' | 'compressing' | 'uploading' | 'saving' | 'done' | 'error';
+  error?: string;
+  finishedAt?: number;
+}
+
+export interface OptimisticPhotoPreview {
+  id: string;
+  pinId: string;
+  name: string;
+  tempUrl: string;
+  displayUrl: string;
+  remoteUrl?: string;
+  status: 'uploading' | 'saved' | 'failed' | 'cancelled';
+}
+
+export interface UploadBatchSummary {
+  total: number;
+  succeeded: number;
+  failed: number;
+  completed: boolean;
+}
+
 const ALLOWED_EMAILS = new Set([
   'jeanlabus.jl65@gmail.com',
   'ankesmith0@gmail.com',
 ]);
 
 const getFallbackThumbnail = (seed: string) => `https://picsum.photos/seed/${seed}/200/200`;
+const SMALL_IMAGE_THRESHOLD_BYTES = 200 * 1024;
+const MAX_IMAGE_DIMENSION = 1600;
+const COMPLETED_UPLOAD_RETENTION_MS = 4000;
+
+type UploadQueueItem = {
+  itemId: string;
+  pinId: string;
+  name: string;
+  file: File;
+  originalIndex: number;
+};
+
+type AsyncQueue<T> = {
+  push: (item: T) => void;
+  shift: () => Promise<T | undefined>;
+  close: () => void;
+};
+
+const createAsyncQueue = <T,>(): AsyncQueue<T> => {
+  const items: T[] = [];
+  const waiters: Array<(value: T | undefined) => void> = [];
+  let isClosed = false;
+
+  return {
+    push(item: T) {
+      if (isClosed) {
+        return;
+      }
+      const waiter = waiters.shift();
+      if (waiter) {
+        waiter(item);
+        return;
+      }
+      items.push(item);
+    },
+    shift() {
+      if (items.length > 0) {
+        return Promise.resolve(items.shift());
+      }
+      if (isClosed) {
+        return Promise.resolve(undefined);
+      }
+
+      return new Promise<T | undefined>((resolve) => {
+        waiters.push(resolve);
+      });
+    },
+    close() {
+      isClosed = true;
+      while (waiters.length > 0) {
+        const waiter = waiters.shift();
+        waiter?.(undefined);
+      }
+    },
+  };
+};
+
+const yieldToMainThread = async () => {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+};
+
+const getAdaptiveWebpQuality = (fileSizeBytes: number) => {
+  const sizeMb = fileSizeBytes / (1024 * 1024);
+  if (sizeMb < 2) {
+    return 0.8;
+  }
+  if (sizeMb <= 5) {
+    return 0.7;
+  }
+  return 0.6;
+};
 
 const getErrorMessage = (error: unknown) => {
   if (typeof error === 'object' && error !== null) {
@@ -63,14 +162,83 @@ const getErrorMessage = (error: unknown) => {
   return 'Unknown error';
 };
 
+const fileNameToWebp = (fileName: string) => {
+  const lastDot = fileName.lastIndexOf('.');
+  const baseName = lastDot > 0 ? fileName.slice(0, lastDot) : fileName;
+  return `${baseName}.webp`;
+};
+
+const loadImageElement = (file: File): Promise<HTMLImageElement> => {
+  const objectUrl = URL.createObjectURL(file);
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Could not decode image in browser.'));
+    };
+    image.src = objectUrl;
+  });
+};
+
+export const compressAndResizeImage = async (file: File): Promise<File> => {
+  const mimeType = (file.type || '').toLowerCase();
+  const isHeicLike = mimeType.includes('heic') || mimeType.includes('heif');
+
+  if (file.size <= SMALL_IMAGE_THRESHOLD_BYTES && !isHeicLike) {
+    return file;
+  }
+
+  const image = await loadImageElement(file);
+  const longestSide = Math.max(image.naturalWidth, image.naturalHeight);
+  const scale = longestSide > MAX_IMAGE_DIMENSION ? MAX_IMAGE_DIMENSION / longestSide : 1;
+  const targetWidth = Math.max(1, Math.round(image.naturalWidth * scale));
+  const targetHeight = Math.max(1, Math.round(image.naturalHeight * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('Canvas rendering context is unavailable.');
+  }
+
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+
+  const quality = getAdaptiveWebpQuality(file.size);
+
+  const blob = await new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((result) => resolve(result), 'image/webp', quality);
+  });
+
+  if (!blob) {
+    throw new Error('Image compression failed to produce output.');
+  }
+
+  if (blob.size >= file.size && !isHeicLike) {
+    return file;
+  }
+
+  return new File([blob], fileNameToWebp(file.name), {
+    type: 'image/webp',
+    lastModified: Date.now(),
+  });
+};
+
 const uploadBytesWithTimeout = async (
   storageRef: ReturnType<typeof ref>,
   file: File,
   onProgress?: (progress: number) => void,
-  timeoutMs = 45000
+  timeoutMs = 45000,
+  onTaskReady?: (task: ReturnType<typeof uploadBytesResumable>) => void
 ) => {
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
   const uploadTask = uploadBytesResumable(storageRef, file);
+  onTaskReady?.(uploadTask);
 
   try {
     const uploadPromise = new Promise<void>((resolve, reject) => {
@@ -129,7 +297,8 @@ const uploadPinImage = async (
   pinId: string,
   file: File,
   prefix: 'thumb' | 'photo',
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  onTaskReady?: (task: ReturnType<typeof uploadBytesResumable>) => void
 ) => {
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
   const objectPath = `pins/${pinId}/${prefix}-${Date.now()}-${safeName}`;
@@ -140,7 +309,7 @@ const uploadPinImage = async (
   for (const candidate of candidates) {
     try {
       const candidateRef = ref(candidate, objectPath);
-      await uploadBytesWithTimeout(candidateRef, file, onProgress, getUploadTimeoutMs(file));
+      await uploadBytesWithTimeout(candidateRef, file, onProgress, getUploadTimeoutMs(file), onTaskReady);
       return getDownloadURL(candidateRef);
     } catch (error) {
       lastError = error;
@@ -180,6 +349,13 @@ function App() {
   const [lastStorageError, setLastStorageError] = useState<string | null>(null);
   const [lastAction, setLastAction] = useState('idle');
   const [lastActionAt, setLastActionAt] = useState<string | null>(null);
+  const [uploadItems, setUploadItems] = useState<UploadItemProgress[]>([]);
+  const [optimisticPhotos, setOptimisticPhotos] = useState<OptimisticPhotoPreview[]>([]);
+  const [uploadSummaryByPin, setUploadSummaryByPin] = useState<Record<string, UploadBatchSummary>>({});
+  const activeUploadTasksRef = useRef<globalThis.Map<string, ReturnType<typeof uploadBytesResumable>>>(new globalThis.Map());
+  const cancelledUploadIdsRef = useRef<Set<string>>(new Set());
+  const uploadSourceFilesRef = useRef<globalThis.Map<string, File>>(new globalThis.Map());
+  const optimisticPhotosRef = useRef<OptimisticPhotoPreview[]>([]);
 
   const markAction = useCallback((action: string) => {
     setLastAction(action);
@@ -190,6 +366,424 @@ function App() {
     () => pins.find((pin) => pin.id === selectedPinId) || null,
     [pins, selectedPinId]
   );
+
+  const selectedPinUploads = useMemo(() => {
+    if (!selectedPinId) {
+      return [] as UploadItemProgress[];
+    }
+    return uploadItems.filter((item) => item.pinId === selectedPinId);
+  }, [uploadItems, selectedPinId]);
+
+  const selectedPinOptimisticPhotos = useMemo(() => {
+    if (!selectedPinId) {
+      return [] as OptimisticPhotoPreview[];
+    }
+    return optimisticPhotos.filter((item) => item.pinId === selectedPinId);
+  }, [optimisticPhotos, selectedPinId]);
+
+  const selectedPinBatchSummary = useMemo(() => {
+    if (!selectedPinId) {
+      return null;
+    }
+    return uploadSummaryByPin[selectedPinId] || null;
+  }, [selectedPinId, uploadSummaryByPin]);
+
+  const selectedPinUploadSummary = useMemo(() => {
+    const total = Math.max(selectedPinUploads.length, selectedPinBatchSummary?.total || 0);
+    const completed = selectedPinUploads.filter((item) => item.stage === 'done' || item.stage === 'error').length;
+    const active = selectedPinUploads.filter((item) => item.stage !== 'done' && item.stage !== 'error').length;
+    const averageProgress = active > 0
+      ? Math.round(
+          selectedPinUploads
+            .filter((item) => item.stage !== 'done' && item.stage !== 'error')
+            .reduce((sum, item) => sum + item.progress, 0) / active
+        )
+      : null;
+
+    return {
+      total,
+      completed,
+      active,
+      averageProgress,
+      label: active > 0
+        ? `Uploading ${Math.min(completed + 1, total)} of ${total}`
+        : selectedPinBatchSummary?.completed
+          ? `${selectedPinBatchSummary.succeeded} uploaded, ${selectedPinBatchSummary.failed} failed`
+          : null,
+    };
+  }, [selectedPinBatchSummary, selectedPinUploads]);
+
+  const updateUploadItem = useCallback((id: string, patch: Partial<UploadItemProgress>) => {
+    setUploadItems((previous) => previous.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  }, []);
+
+  const isUploadCancelled = useCallback((itemId: string) => {
+    return cancelledUploadIdsRef.current.has(itemId);
+  }, []);
+
+  const markUploadFailure = useCallback((itemId: string, message: string) => {
+    const isCancelled = message.toLowerCase().includes('cancel');
+    updateUploadItem(itemId, {
+      stage: 'error',
+      error: message,
+      finishedAt: Date.now(),
+    });
+    setOptimisticPhotos((previous) => previous.map((photo) => (
+      photo.id === itemId
+        ? { ...photo, status: isCancelled ? 'cancelled' : 'failed' }
+        : photo
+    )));
+  }, [updateUploadItem]);
+
+  const handleCancelUploadItem = useCallback((itemId: string) => {
+    cancelledUploadIdsRef.current.add(itemId);
+    const activeTask = activeUploadTasksRef.current.get(itemId);
+    if (activeTask) {
+      activeTask.cancel();
+    }
+    markUploadFailure(itemId, 'Upload cancelled by user.');
+  }, [markUploadFailure]);
+
+  const uploadSingleImage = useCallback(async (
+    pinId: string,
+    file: File,
+    prefix: 'thumb' | 'photo',
+    onProgress?: (progress: number) => void,
+    itemId?: string
+  ) => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (itemId && isUploadCancelled(itemId)) {
+        throw new Error('Upload cancelled by user.');
+      }
+      try {
+        return await uploadPinImage(pinId, file, prefix, onProgress, (task) => {
+          if (itemId) {
+            activeUploadTasksRef.current.set(itemId, task);
+          }
+        });
+      } catch (error) {
+        lastError = error;
+      } finally {
+        if (itemId) {
+          activeUploadTasksRef.current.delete(itemId);
+        }
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(getErrorMessage(lastError));
+  }, [isUploadCancelled]);
+
+  const appendPhotosToPinSafely = useCallback(async (pinId: string, photoUrls: string[]) => {
+    if (photoUrls.length === 0) {
+      return;
+    }
+
+    const pinRef = doc(db, 'pins', pinId);
+
+    await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(pinRef);
+      if (!snapshot.exists()) {
+        throw new Error('Pin does not exist anymore.');
+      }
+
+      const data = snapshot.data() as { photos?: string[]; thumbnail?: string };
+      const currentPhotos = Array.isArray(data.photos) ? data.photos : [];
+      const mergedPhotos = [...currentPhotos];
+      for (const url of photoUrls) {
+        if (!mergedPhotos.includes(url)) {
+          mergedPhotos.push(url);
+        }
+      }
+
+      if (mergedPhotos.length === currentPhotos.length) {
+        return;
+      }
+
+      transaction.update(pinRef, {
+        photos: mergedPhotos,
+        photoCount: mergedPhotos.length,
+        thumbnail: data.thumbnail || mergedPhotos[0] || getFallbackThumbnail(pinId),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  }, []);
+
+  const processAndUploadImage = useCallback(async (input: UploadQueueItem) => {
+    try {
+      if (isUploadCancelled(input.itemId)) {
+        markUploadFailure(input.itemId, 'Upload cancelled by user.');
+        return null;
+      }
+
+      updateUploadItem(input.itemId, { stage: 'uploading', progress: 20 });
+
+      const photoUrl = await uploadSingleImage(input.pinId, input.file, 'photo', (progress) => {
+        const boundedProgress = Math.min(95, Math.max(20, Math.round(20 + (progress * 0.75))));
+        updateUploadItem(input.itemId, { stage: 'uploading', progress: boundedProgress });
+      }, input.itemId);
+
+      updateUploadItem(input.itemId, { stage: 'saving', progress: 100 });
+      return {
+        itemId: input.itemId,
+        photoUrl,
+      };
+    } catch (error) {
+      const message = getErrorMessage(error);
+      markUploadFailure(input.itemId, message);
+
+      if (message.toLowerCase().includes('upload') || message.toLowerCase().includes('storage')) {
+        setLastStorageError(message);
+      }
+      if (message.toLowerCase().includes('saving') || message.toLowerCase().includes('firestore')) {
+        setLastFirestoreError(message);
+      }
+      setAppError(`Photo upload failed for ${input.name}. ${message}`);
+      return null;
+    }
+  }, [isUploadCancelled, markUploadFailure, updateUploadItem, uploadSingleImage]);
+
+  const uploadQueue = useCallback(async (
+    pinId: string,
+    files: File[],
+    uploadConcurrency = 3,
+    compressionConcurrency = 4
+  ) => {
+    const imageFiles = files
+      .map((file, index) => ({ file, index }))
+      .filter((item) => item.file.type.startsWith('image/'));
+
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    markAction('add-photo:start');
+    setAppError(null);
+
+    const startedAt = Date.now();
+    const prioritized = [...imageFiles].sort((a, b) => a.index - b.index);
+    const queueItems: UploadQueueItem[] = prioritized.map((item, index) => ({
+      itemId: `${pinId}-${startedAt}-${index}`,
+      pinId,
+      name: item.file.name,
+      file: item.file,
+      originalIndex: item.index,
+    }));
+
+    const progressItems: UploadItemProgress[] = queueItems.map((item) => ({
+      id: item.itemId,
+      pinId: item.pinId,
+      name: item.name,
+      progress: 0,
+      stage: 'queued',
+    }));
+
+    const optimisticEntries: OptimisticPhotoPreview[] = queueItems.map((item) => {
+      const tempUrl = URL.createObjectURL(item.file);
+      return {
+        id: item.itemId,
+        pinId: item.pinId,
+        name: item.name,
+        tempUrl,
+        displayUrl: tempUrl,
+        status: 'uploading',
+      };
+    });
+
+    for (const item of queueItems) {
+      cancelledUploadIdsRef.current.delete(item.itemId);
+      uploadSourceFilesRef.current.set(item.itemId, item.file);
+    }
+
+    setUploadItems((previous) => [
+      ...previous.filter((item) => item.pinId !== pinId),
+      ...progressItems,
+    ]);
+
+    setOptimisticPhotos((previous) => [
+      ...previous.filter((item) => item.pinId !== pinId || (item.status !== 'saved' && item.status !== 'uploading')),
+      ...optimisticEntries,
+    ]);
+
+    setUploadSummaryByPin((previous) => ({
+      ...previous,
+      [pinId]: {
+        total: queueItems.length,
+        succeeded: 0,
+        failed: 0,
+        completed: false,
+      },
+    }));
+
+    const uploadReadyQueue = createAsyncQueue<UploadQueueItem>();
+    const successfulUploads: Array<{ itemId: string; photoUrl: string }> = [];
+    let compressionFailures = 0;
+    let uploadFailures = 0;
+
+    const compressionPending = [...queueItems];
+    const compressionWorkers = Array.from(
+      { length: Math.min(Math.max(compressionConcurrency, 1), compressionPending.length) },
+      async () => {
+        while (true) {
+          const next = compressionPending.shift();
+          if (!next) {
+            return;
+          }
+
+          if (isUploadCancelled(next.itemId)) {
+            compressionFailures += 1;
+            markUploadFailure(next.itemId, 'Upload cancelled by user.');
+            continue;
+          }
+
+          updateUploadItem(next.itemId, { stage: 'compressing', progress: 5 });
+          await yieldToMainThread();
+
+          try {
+            const optimized = await compressAndResizeImage(next.file);
+            if (isUploadCancelled(next.itemId)) {
+              compressionFailures += 1;
+              markUploadFailure(next.itemId, 'Upload cancelled by user.');
+              continue;
+            }
+
+            updateUploadItem(next.itemId, { stage: 'queued', progress: 15 });
+            uploadReadyQueue.push({ ...next, file: optimized });
+          } catch (error) {
+            compressionFailures += 1;
+            markUploadFailure(next.itemId, getErrorMessage(error));
+          }
+        }
+      }
+    );
+
+    const uploadWorkers = Array.from(
+      { length: Math.min(Math.max(uploadConcurrency, 1), queueItems.length) },
+      async () => {
+        while (true) {
+          const nextUpload = await uploadReadyQueue.shift();
+          if (!nextUpload) {
+            return;
+          }
+
+          const result = await processAndUploadImage(nextUpload);
+          if (result) {
+            successfulUploads.push(result);
+          } else {
+            uploadFailures += 1;
+          }
+        }
+      }
+    );
+
+    await Promise.all(compressionWorkers);
+    uploadReadyQueue.close();
+    await Promise.all(uploadWorkers);
+
+    let committedUploads = successfulUploads;
+    if (successfulUploads.length > 0) {
+      try {
+        await withTimeout(
+          appendPhotosToPinSafely(pinId, successfulUploads.map((upload) => upload.photoUrl)),
+          'Saving batch photo metadata'
+        );
+      } catch (error) {
+        const metadataError = getErrorMessage(error);
+        setLastFirestoreError(metadataError);
+        setAppError(`Batch metadata save failed. ${metadataError}`);
+        for (const upload of successfulUploads) {
+          markUploadFailure(upload.itemId, `Metadata save failed: ${metadataError}`);
+        }
+        committedUploads = [];
+      }
+    }
+
+    if (committedUploads.length > 0) {
+      const completedAt = Date.now();
+      const successMap = new globalThis.Map(committedUploads.map((upload) => [upload.itemId, upload.photoUrl]));
+
+      for (const upload of committedUploads) {
+        uploadSourceFilesRef.current.delete(upload.itemId);
+        updateUploadItem(upload.itemId, {
+          stage: 'done',
+          progress: 100,
+          finishedAt: completedAt,
+        });
+      }
+
+      setOptimisticPhotos((previous) => previous.map((photo) => {
+        const remoteUrl = successMap.get(photo.id);
+        if (!remoteUrl || photo.status === 'saved') {
+          return photo;
+        }
+        URL.revokeObjectURL(photo.tempUrl);
+        return {
+          ...photo,
+          status: 'saved',
+          displayUrl: remoteUrl,
+          remoteUrl,
+        };
+      }));
+    }
+
+    const succeededCount = committedUploads.length;
+    const failedCount = queueItems.length - succeededCount;
+
+    setUploadSummaryByPin((previous) => ({
+      ...previous,
+      [pinId]: {
+        total: queueItems.length,
+        succeeded: succeededCount,
+        failed: failedCount,
+        completed: true,
+      },
+    }));
+
+    const hasErrors = compressionFailures + uploadFailures > 0 || failedCount > 0;
+    markAction(hasErrors ? 'add-photo:failed' : 'add-photo:success');
+  }, [appendPhotosToPinSafely, isUploadCancelled, markUploadFailure, markAction, processAndUploadImage, updateUploadItem]);
+
+  useEffect(() => {
+    if (!uploadItems.some((item) => item.stage === 'done')) {
+      return;
+    }
+
+    const timeoutHandle = setTimeout(() => {
+      const now = Date.now();
+      setUploadItems((previous) =>
+        previous.filter(
+          (item) => item.stage !== 'done' || !item.finishedAt || now - item.finishedAt < COMPLETED_UPLOAD_RETENTION_MS
+        )
+      );
+    }, 1000);
+
+    return () => clearTimeout(timeoutHandle);
+  }, [uploadItems]);
+
+  useEffect(() => {
+    optimisticPhotosRef.current = optimisticPhotos;
+  }, [optimisticPhotos]);
+
+  useEffect(() => {
+    setOptimisticPhotos((previous) => previous.filter((entry) => {
+      if (entry.status !== 'saved' || !entry.remoteUrl) {
+        return true;
+      }
+      const pin = pins.find((candidate) => candidate.id === entry.pinId);
+      if (!pin) {
+        return true;
+      }
+      return !pin.photos.includes(entry.remoteUrl);
+    }));
+  }, [pins]);
+
+  useEffect(() => {
+    return () => {
+      for (const preview of optimisticPhotosRef.current) {
+        URL.revokeObjectURL(preview.tempUrl);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
@@ -386,7 +980,8 @@ function App() {
 
       if (pinInput.thumbnailFile) {
         setSyncMessage('Uploading thumbnail...');
-        const thumbUrl = await uploadPinImage(pinRef.id, pinInput.thumbnailFile, 'thumb', setSyncProgress);
+        const optimizedThumbnail = await compressAndResizeImage(pinInput.thumbnailFile);
+        const thumbUrl = await uploadSingleImage(pinRef.id, optimizedThumbnail, 'thumb', setSyncProgress);
         thumbnail = thumbUrl;
         photos.push(thumbUrl);
       }
@@ -435,44 +1030,26 @@ function App() {
     setIsAddingPin(false);
   }, []);
 
-  const handleAddPhoto = useCallback(async (pinId: string, file: File) => {
-    setIsSaving(true);
-    setSyncMessage('Uploading photo...');
-    setSyncProgress(0);
-    setAppError(null);
-    markAction('add-photo:start');
+  const handleAddPhotos = useCallback(async (pinId: string, files: File[]) => {
+    await uploadQueue(pinId, files, 3, 4);
+  }, [uploadQueue]);
 
-    try {
-      const photoUrl = await uploadPinImage(pinId, file, 'photo', setSyncProgress);
-      const pin = pins.find((item) => item.id === pinId);
-      if (!pin) return;
+  const handleRetryFailedUploads = useCallback(async (pinId: string) => {
+    const failedItemIds = uploadItems
+      .filter((item) => item.pinId === pinId && item.stage === 'error')
+      .map((item) => item.id);
 
-      const nextPhotos = [...pin.photos, photoUrl];
-      await withTimeout(
-        updateDoc(doc(db, 'pins', pinId), {
-          photos: nextPhotos,
-          photoCount: nextPhotos.length,
-          thumbnail: pin.thumbnail || photoUrl,
-          updatedAt: serverTimestamp(),
-        }),
-        'Saving photo metadata'
-      );
-      markAction('add-photo:success');
-    } catch (error) {
-      const message = getErrorMessage(error);
-      if (message.toLowerCase().includes('upload') || message.toLowerCase().includes('storage')) {
-        setLastStorageError(message);
-      }
-      if (message.toLowerCase().includes('saving photo metadata') || message.toLowerCase().includes('firestore')) {
-        setLastFirestoreError(message);
-      }
-      setAppError(`Photo upload failed. ${getErrorMessage(error)}`);
-      markAction('add-photo:failed');
-    } finally {
-      setIsSaving(false);
-      setSyncProgress(null);
+    const retryFiles = failedItemIds
+      .map((id) => uploadSourceFilesRef.current.get(id))
+      .filter((file): file is File => Boolean(file));
+
+    if (retryFiles.length === 0) {
+      setAppError('No failed files are available to retry. Please reselect images.');
+      return;
     }
-  }, [pins, markAction]);
+
+    await uploadQueue(pinId, retryFiles, 3, 4);
+  }, [uploadItems, uploadQueue]);
 
   const handleRemovePhoto = useCallback(async (pinId: string, photoIndex: number) => {
     const pin = pins.find((item) => item.id === pinId);
@@ -661,10 +1238,16 @@ function App() {
             pin={selectedPin}
             onClose={handleCloseAlbum}
             onAddSong={handleAddSong}
-            onAddPhoto={handleAddPhoto}
+            onAddPhotos={handleAddPhotos}
             onRemovePhoto={handleRemovePhoto}
-            isSyncing={isSaving}
-            syncProgress={syncProgress}
+            isSyncing={selectedPinUploadSummary.active > 0}
+            syncProgress={selectedPinUploadSummary.averageProgress}
+            uploadItems={selectedPinUploads}
+            uploadStatusLabel={selectedPinUploadSummary.label}
+            uploadSummary={selectedPinBatchSummary}
+            optimisticPhotos={selectedPinOptimisticPhotos}
+            onCancelUpload={handleCancelUploadItem}
+            onRetryFailedUploads={handleRetryFailedUploads}
           />
         )}
 
@@ -709,6 +1292,7 @@ function App() {
             <p><strong>Firestore Health:</strong> {firestoreHealth}</p>
             <p><strong>Last Action:</strong> {lastAction}</p>
             <p><strong>Last Action At:</strong> {lastActionAt || 'n/a'}</p>
+            <p><strong>Active Uploads:</strong> {selectedPinUploadSummary.active}</p>
             <p><strong>Last Firestore Error:</strong> {lastFirestoreError || 'none'}</p>
             <p><strong>Last Storage Error:</strong> {lastStorageError || 'none'}</p>
             <p><strong>Health Message:</strong> {firestoreHealthMessage || 'none'}</p>

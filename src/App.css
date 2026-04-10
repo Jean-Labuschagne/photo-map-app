@@ -1503,6 +1503,9 @@ body {
 }
 
 .album-sync-status {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
   margin-bottom: 1rem;
   padding: 0.5rem 0.75rem;
   border-radius: var(--radius-md);
@@ -1511,6 +1514,44 @@ body {
   color: var(--accent);
   font-size: 0.85rem;
   font-weight: 600;
+}
+
+.album-upload-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.album-upload-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.album-cancel-upload-btn {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.4rem;
+  font-size: 0.7rem;
+}
+
+.album-optimistic-badge {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  background: rgba(0, 0, 0, 0.68);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: 0.2rem 0.4rem;
+  font-size: 0.7rem;
+  text-transform: capitalize;
 }
 
 .diagnostics-panel {
