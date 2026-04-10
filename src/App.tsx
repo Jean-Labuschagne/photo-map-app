@@ -1189,6 +1189,14 @@ function App() {
             <Play size={16} />
             Movie
           </button>
+          {canViewDiagnostics && (
+            <button
+              onClick={() => setShowDiagnostics((value) => !value)}
+              className={showDiagnostics ? 'active' : ''}
+            >
+              Diagnostics
+            </button>
+          )}
         </div>
       </nav>
 
@@ -1285,27 +1293,22 @@ function App() {
         />
       )}
 
-      {canViewDiagnostics && (
+      {canViewDiagnostics && showDiagnostics && (
         <section className="diagnostics-panel">
-          <button className="diagnostics-toggle" onClick={() => setShowDiagnostics((value) => !value)}>
-            {showDiagnostics ? 'Hide Diagnostics' : 'Show Diagnostics'}
-          </button>
-          {showDiagnostics && (
-            <div className="diagnostics-body">
-              <p><strong>Project:</strong> {import.meta.env.VITE_FIREBASE_PROJECT_ID || 'n/a'}</p>
-              <p><strong>Auth Domain:</strong> {import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'n/a'}</p>
-              <p><strong>Storage Bucket (env):</strong> {import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'n/a'}</p>
-              <p><strong>Buckets Tried:</strong> {STORAGE_BUCKET_CANDIDATES.join(', ')}</p>
-              <p><strong>User:</strong> {user.email || 'n/a'}</p>
-              <p><strong>Firestore Health:</strong> {firestoreHealth}</p>
-              <p><strong>Last Action:</strong> {lastAction}</p>
-              <p><strong>Last Action At:</strong> {lastActionAt || 'n/a'}</p>
-              <p><strong>Active Uploads:</strong> {selectedPinUploadSummary.active}</p>
-              <p><strong>Last Firestore Error:</strong> {lastFirestoreError || 'none'}</p>
-              <p><strong>Last Storage Error:</strong> {lastStorageError || 'none'}</p>
-              <p><strong>Health Message:</strong> {firestoreHealthMessage || 'none'}</p>
-            </div>
-          )}
+          <div className="diagnostics-body">
+            <p><strong>Project:</strong> {import.meta.env.VITE_FIREBASE_PROJECT_ID || 'n/a'}</p>
+            <p><strong>Auth Domain:</strong> {import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'n/a'}</p>
+            <p><strong>Storage Bucket (env):</strong> {import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'n/a'}</p>
+            <p><strong>Buckets Tried:</strong> {STORAGE_BUCKET_CANDIDATES.join(', ')}</p>
+            <p><strong>User:</strong> {user.email || 'n/a'}</p>
+            <p><strong>Firestore Health:</strong> {firestoreHealth}</p>
+            <p><strong>Last Action:</strong> {lastAction}</p>
+            <p><strong>Last Action At:</strong> {lastActionAt || 'n/a'}</p>
+            <p><strong>Active Uploads:</strong> {selectedPinUploadSummary.active}</p>
+            <p><strong>Last Firestore Error:</strong> {lastFirestoreError || 'none'}</p>
+            <p><strong>Last Storage Error:</strong> {lastStorageError || 'none'}</p>
+            <p><strong>Health Message:</strong> {firestoreHealthMessage || 'none'}</p>
+          </div>
         </section>
       )}
     </div>
