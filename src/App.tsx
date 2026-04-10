@@ -79,6 +79,7 @@ const getFallbackThumbnail = (seed: string) => `https://picsum.photos/seed/${see
 const SMALL_IMAGE_THRESHOLD_BYTES = 200 * 1024;
 const MAX_IMAGE_DIMENSION = 1600;
 const COMPLETED_UPLOAD_RETENTION_MS = 4000;
+const FIRESTORE_WRITE_TIMEOUT_MS = 45000;
 
 type UploadQueueItem = {
   itemId: string;
@@ -685,7 +686,8 @@ function App() {
       try {
         await withTimeout(
           appendPhotosToPinSafely(pinId, successfulUploads.map((upload) => upload.photoUrl)),
-          'Saving batch photo metadata'
+          'Saving batch photo metadata',
+          FIRESTORE_WRITE_TIMEOUT_MS
         );
       } catch (error) {
         const metadataError = getErrorMessage(error);
@@ -929,7 +931,8 @@ function App() {
         song,
         updatedAt: serverTimestamp(),
       }),
-      'Saving song'
+      'Saving song',
+      FIRESTORE_WRITE_TIMEOUT_MS
     ).catch((error) => {
       setLastFirestoreError(getErrorMessage(error));
       setAppError(`Failed to save song. ${getErrorMessage(error)}`);
@@ -1001,7 +1004,8 @@ function App() {
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         }),
-        'Saving pin data'
+        'Saving pin data',
+        FIRESTORE_WRITE_TIMEOUT_MS
       );
 
       setSelectedPinId(pinRef.id);
@@ -1070,7 +1074,8 @@ function App() {
           thumbnail: nextPhotos[0] || getFallbackThumbnail(pinId),
           updatedAt: serverTimestamp(),
         }),
-        'Removing photo metadata'
+        'Removing photo metadata',
+        FIRESTORE_WRITE_TIMEOUT_MS
       );
 
       if (removedPhotoUrl?.includes('firebasestorage.googleapis.com')) {
